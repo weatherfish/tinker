@@ -234,6 +234,7 @@ public class DefaultLoadReporter implements LoadReporter {
                 //exception can be caught, it is no need to disable Tinker with sharedPreference
                 break;
         }
+        TinkerLog.e(TAG, "tinker load exception, welcome to submit issue to us: https://github.com/Tencent/tinker/issues");
         TinkerLog.printErrStackTrace(TAG, e, "tinker load exception");
 
         Tinker.with(context).setTinkerDisable();
@@ -253,6 +254,7 @@ public class DefaultLoadReporter implements LoadReporter {
      *                  {@code ShareConstants.ERROR_PACKAGE_CHECK_PATCH_TINKER_ID_NOT_FOUND}       can't find TINKER_PATCH in patch meta file
      *                  {@code ShareConstants.ERROR_PACKAGE_CHECK_TINKER_ID_NOT_EQUAL}             apk and patch's TINKER_PATCH value is not equal
      *                  {@code ShareConstants.ERROR_PACKAGE_CHECK_RESOURCE_META_CORRUPTED}         resource meta file's format check fail
+     *                  {@code ShareConstants.ERROR_PACKAGE_CHECK_TINKERFLAG_NOT_SUPPORT}          some patch file type is not supported for current tinkerFlag
      */
     @Override
     public void onLoadPackageCheckFail(File patchFile, int errorCode) {

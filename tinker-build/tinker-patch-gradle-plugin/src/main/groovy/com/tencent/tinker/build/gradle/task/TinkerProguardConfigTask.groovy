@@ -32,6 +32,7 @@ public class TinkerProguardConfigTask extends DefaultTask {
     static final String PROGUARD_CONFIG_SETTINGS =
             "-keepattributes *Annotation* \n" +
                     "-dontwarn com.tencent.tinker.anno.AnnotationProcessor \n" +
+                    "-dontwarn ${AuxiliaryClassInjector.NOT_EXISTS_CLASSNAME} \n" +
                     "-keep @com.tencent.tinker.anno.DefaultLifeCycle public class *\n" +
                     "-keep public class * extends android.app.Application {\n" +
                     "    *;\n" +
@@ -88,16 +89,16 @@ public class TinkerProguardConfigTask extends DefaultTask {
 
         fr.write(PROGUARD_CONFIG_SETTINGS)
 
-        // Write additional rules to keep auxiliary class, <init> and <clinit>
+        // Write additional rules to keep <init> and <clinit>
         if (project.tinkerPatch.dex.usePreGeneratedPatchDex) {
             def additionalKeptRules =
-                    "-dontwarn ${AuxiliaryClassInjector.AUXILIARY_CLASSNAME} \n" +
+                            "-keep class ${AuxiliaryClassInjector.NOT_EXISTS_CLASSNAME} { \n" +
+                            '    *; \n' +
+                            '}\n' +
+                            '\n' +
                             '-keepclassmembers class * { \n' +
                             '    <init>(...); \n' +
                             '    static void <clinit>(...); \n' +
-                            '}\n' +
-                            "-keep class ${AuxiliaryClassInjector.AUXILIARY_CLASSNAME} {\n" +
-                            '    *;\n' +
                             '}\n'
             fr.write(additionalKeptRules)
             fr.write('\n')
@@ -107,6 +108,9 @@ public class TinkerProguardConfigTask extends DefaultTask {
         //they will removed when apply
         Iterable<String> loader = project.extensions.tinkerPatch.dex.loader
         for (String pattern : loader) {
+            if (pattern.endsWith("*") && !pattern.endsWith("**")) {
+                pattern += "*"
+            }
             fr.write("-keep class " + pattern)
             fr.write("\n")
         }

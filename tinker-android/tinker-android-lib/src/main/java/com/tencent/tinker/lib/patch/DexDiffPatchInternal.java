@@ -18,6 +18,7 @@ package com.tencent.tinker.lib.patch;
 
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
+import android.os.Build;
 import android.os.SystemClock;
 
 import com.tencent.tinker.commons.dexpatcher.DexPatchApplier;
@@ -53,7 +54,6 @@ public class DexDiffPatchInternal extends BasePatchInternal {
 
     protected static boolean tryRecoverDexFiles(Tinker manager, ShareSecurityCheck checker, Context context,
                                                 String patchVersionDirectory, File patchFile, boolean isUpgradePatch) {
-
         if (!manager.isEnabledForDex()) {
             TinkerLog.w(TAG, "patch recover, dex is not enabled");
             return true;
@@ -73,6 +73,8 @@ public class DexDiffPatchInternal extends BasePatchInternal {
     }
 
     private static boolean patchDexExtractViaDexDiff(Context context, String patchVersionDirectory, String meta, File patchFile, boolean isUpgradePatch) {
+        checkVmArtProperty();
+
         String dir = patchVersionDirectory + "/" + DEX_PATH + "/";
 
         int dexType = ShareTinkerInternals.isVmArt() ? TYPE_DEX_FOR_ART : TYPE_DEX;
@@ -180,6 +182,10 @@ public class DexDiffPatchInternal extends BasePatchInternal {
                 String dexDiffMd5 = info.dexDiffMd5;
                 String oldDexCrc = info.oldDexCrC;
 
+                if (!ShareTinkerInternals.isVmArt() && info.destMd5InDvm.equals("0")) {
+                    TinkerLog.w(TAG, "patch dex %s is only for art, just continue", patchRealPath);
+                    continue;
+                }
                 String extractedFileMd5 = ShareTinkerInternals.isVmArt() ? info.destMd5InArt : info.destMd5InDvm;
 
                 if (!SharePatchFileUtil.checkIfMd5Valid(extractedFileMd5)) {
@@ -401,6 +407,16 @@ public class DexDiffPatchInternal extends BasePatchInternal {
             }
         }
         return isExtractionSuccessful;
+    }
+
+    /**
+     * reject dalvik vm, but sdk version is larger than 21
+     */
+    private static void checkVmArtProperty() {
+        boolean art = ShareTinkerInternals.isVmArt();
+        if (!art && Build.VERSION.SDK_INT >= 21) {
+            throw new TinkerRuntimeException("it is dalvik vm, but sdk version " + Build.VERSION.SDK_INT + " is larger than 21!");
+        }
     }
 
     private static boolean extractDexFile(ZipFile zipFile, ZipEntry entryFile, File extractTo, ShareDexDiffPatchInfo dexInfo) throws IOException {

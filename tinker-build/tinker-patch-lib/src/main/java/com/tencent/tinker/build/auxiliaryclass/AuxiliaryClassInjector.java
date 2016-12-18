@@ -31,6 +31,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.Charset;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -40,7 +42,10 @@ import java.util.zip.ZipOutputStream;
  */
 
 public final class AuxiliaryClassInjector {
-    public static final String AUXILIARY_CLASSNAME = "dalvik.system.PathClassLoader";
+    // The descriptor of this class is so strange so that we hope no one
+    // would happen to create a class named the same as it.
+    public static final String NOT_EXISTS_CLASSNAME
+            = "tInKEr.pReVEnT.PrEVErIfIEd.STuBCLaSS";
 
     public interface ProcessJarCallback {
         boolean onProcessClassEntry(String entryName);
@@ -79,22 +84,35 @@ public final class AuxiliaryClassInjector {
             zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(jarIn)), charsetIn);
             zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(jarOut)), charsetOut);
             ZipEntry entryIn = null;
+            Map<String, Integer> processedEntryNamesMap = new HashMap<>();
             while ((entryIn = zis.getNextEntry()) != null) {
                 final String entryName = entryIn.getName();
-                ZipEntry entryOut = new ZipEntry(entryName);
-                zos.putNextEntry(entryOut);
-                if (!entryIn.isDirectory()) {
-                    if (entryName.endsWith(".class")) {
-                        if (cb == null || cb.onProcessClassEntry(entryName)) {
-                            processClass(zis, zos);
+                ZipEntry entryOut = new ZipEntry(entryIn);
+                entryOut.setCompressedSize(-1);
+                if (!processedEntryNamesMap.containsKey(entryName)) {
+                    zos.putNextEntry(entryOut);
+                    if (!entryIn.isDirectory()) {
+                        if (entryName.endsWith(".class")) {
+                            if (cb == null || cb.onProcessClassEntry(entryName)) {
+                                processClass(zis, zos);
+                            } else {
+                                Streams.copy(zis, zos);
+                            }
                         } else {
                             Streams.copy(zis, zos);
                         }
-                    } else {
-                        Streams.copy(zis, zos);
                     }
+                    zos.closeEntry();
+                    processedEntryNamesMap.put(entryName, 1);
+                } else {
+                    int duplicateCount = processedEntryNamesMap.get(entryName);
+                    final String wrapperJarName
+                            = jarOut.getName().substring(0, jarOut.getName().lastIndexOf(".jar"))
+                            + "_dup_ew_" + duplicateCount + ".jar";
+                    File wrapperJarOut = new File(jarOut.getParentFile(), wrapperJarName);
+                    wrapEntryByJar(entryOut, zis, wrapperJarOut);
+                    processedEntryNamesMap.put(entryName, duplicateCount + 1);
                 }
-                zos.closeEntry();
             }
         } finally {
             closeQuietly(zos);
@@ -102,10 +120,22 @@ public final class AuxiliaryClassInjector {
         }
     }
 
+    private static void wrapEntryByJar(ZipEntry ze, InputStream eData, File jarOut) throws IOException {
+        ZipOutputStream zos = null;
+        try {
+            zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(jarOut)));
+            zos.putNextEntry(ze);
+            Streams.copy(eData, zos);
+            zos.closeEntry();
+        } finally {
+            closeQuietly(zos);
+        }
+    }
+
     private static void processClass(InputStream classIn, OutputStream classOut) throws IOException {
         ClassReader cr = new ClassReader(classIn);
         ClassWriter cw = new ClassWriter(0);
-        AuxiliaryClassInjectAdapter aia = new AuxiliaryClassInjectAdapter(AUXILIARY_CLASSNAME, cw);
+        AuxiliaryClassInjectAdapter aia = new AuxiliaryClassInjectAdapter(NOT_EXISTS_CLASSNAME, cw);
         cr.accept(aia, 0);
         classOut.write(cw.toByteArray());
         classOut.flush();
