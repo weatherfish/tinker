@@ -38,10 +38,14 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.List;
+import java.util.Vector;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
+
+import dalvik.system.DexFile;
 
 /**
  * Created by zhangshaowen on 16/4/12.
@@ -49,8 +53,15 @@ import java.util.zip.ZipOutputStream;
 public class DexDiffPatchInternal extends BasePatchInternal {
     protected static final String TAG = "Tinker.DexDiffPatchInternal";
 
+    protected static final int WAIT_ASYN_OAT_TIME = 8 * 1000;
+    protected static final int MAX_WAIT_COUNT     = 30;
+
+    private static ArrayList<File> optFiles = new ArrayList<>();
+    private static List<File> failOptDexFile = new Vector<>();
+
+
     protected static boolean tryRecoverDexFiles(Tinker manager, ShareSecurityCheck checker, Context context,
-                                                String patchVersionDirectory, File patchFile, boolean isUpgradePatch) {
+                                                String patchVersionDirectory, File patchFile) {
         if (!manager.isEnabledForDex()) {
             TinkerLog.w(TAG, "patch recover, dex is not enabled");
             return true;
@@ -63,17 +74,54 @@ public class DexDiffPatchInternal extends BasePatchInternal {
         }
 
         long begin = SystemClock.elapsedRealtime();
-        boolean result = patchDexExtractViaDexDiff(context, patchVersionDirectory, dexMeta, patchFile, isUpgradePatch);
+        boolean result = patchDexExtractViaDexDiff(context, patchVersionDirectory, dexMeta, patchFile);
         long cost = SystemClock.elapsedRealtime() - begin;
-        TinkerLog.i(TAG, "recover dex result:%b, cost:%d, isUpgradePatch:%b", result, cost, isUpgradePatch);
+        TinkerLog.i(TAG, "recover dex result:%b, cost:%d", result, cost);
         return result;
     }
 
-    private static boolean patchDexExtractViaDexDiff(Context context, String patchVersionDirectory, String meta, final File patchFile, final boolean isUpgradePatch) {
+    protected static boolean waitDexOptFile() {
+        if (optFiles.isEmpty()) {
+            return true;
+        }
+
+        int size = optFiles.size() * 6;
+        if (size > MAX_WAIT_COUNT) {
+            size = MAX_WAIT_COUNT;
+        }
+        TinkerLog.i(TAG, "dex count: %d, final wait time: %d", optFiles.size(), size);
+
+        for (int i = 0; i < size; i++) {
+            if (!checkAllDexOptFile(optFiles, i + 1)) {
+                try {
+                    Thread.sleep(WAIT_ASYN_OAT_TIME);
+                } catch (InterruptedException e) {
+                    TinkerLog.e(TAG, "thread sleep InterruptedException e:" + e);
+                }
+            }
+        }
+
+        // check again, if still can be found, just return
+        for (File file : optFiles) {
+            TinkerLog.i(TAG, "check dex optimizer file %s, size %d", file.getName(), file.length());
+
+            if (!SharePatchFileUtil.isLegalFile(file)) {
+                TinkerLog.e(TAG, "final parallel dex optimizer file %s is not exist, return false", file.getName());
+                // don't report fail
+//                manager.getPatchReporter()
+//                    .onPatchDexOptFail(patchFile, file, file.getParentFile().getPath(),
+//                        file.getName(), new TinkerRuntimeException("dexOpt file:" + file.getName() + " is not exist"));
+                return false;
+
+            }
+        }
+        return true;
+    }
+
+    private static boolean patchDexExtractViaDexDiff(Context context, String patchVersionDirectory, String meta, final File patchFile) {
         String dir = patchVersionDirectory + "/" + DEX_PATH + "/";
 
-        int dexType = ShareTinkerInternals.isVmArt() ? TYPE_DEX_FOR_ART : TYPE_DEX;
-        if (!extractDexDiffInternals(context, dir, meta, patchFile, dexType, isUpgradePatch)) {
+        if (!extractDexDiffInternals(context, dir, meta, patchFile, TYPE_DEX)) {
             TinkerLog.w(TAG, "patch recover, extractDiffInternals fail");
             return false;
         }
@@ -82,38 +130,114 @@ public class DexDiffPatchInternal extends BasePatchInternal {
 
         File dexFiles = new File(dir);
         File[] files = dexFiles.listFiles();
+        optFiles.clear();
 
         if (files != null) {
             final String optimizeDexDirectory = patchVersionDirectory + "/" + DEX_OPTIMIZE_PATH + "/";
             File optimizeDexDirectoryFile = new File(optimizeDexDirectory);
 
-            if (!optimizeDexDirectoryFile.exists()) {
-                optimizeDexDirectoryFile.mkdirs();
+            if (!optimizeDexDirectoryFile.exists() && !optimizeDexDirectoryFile.mkdirs()) {
+                TinkerLog.w(TAG, "patch recover, make optimizeDexDirectoryFile fail");
+                return false;
+            }
+            // add opt files
+            for (File file : files) {
+                String outputPathName = SharePatchFileUtil.optimizedPathFor(file, optimizeDexDirectoryFile);
+                optFiles.add(new File(outputPathName));
             }
 
-            boolean isSuccess = TinkerParallelDexOptimizer.optimizeAll(
+            TinkerLog.w(TAG, "patch recover, try to optimize dex file count:%d", files.length);
+
+            // only use parallel dex optimizer for art
+            if (ShareTinkerInternals.isVmArt()) {
+                failOptDexFile.clear();
+                // try parallel dex optimizer
+                TinkerParallelDexOptimizer.optimizeAll(
                     files, optimizeDexDirectoryFile,
                     new TinkerParallelDexOptimizer.ResultCallback() {
+                        long startTime;
+
                         @Override
-                        public void onSuccess(File dexFile, File optimizedDir) {
+                        public void onStart(File dexFile, File optimizedDir) {
+                            startTime = System.currentTimeMillis();
+                            TinkerLog.i(TAG, "start to parallel optimize dex %s, size: %d", dexFile.getPath(), dexFile.length());
+                        }
+
+                        @Override
+                        public void onSuccess(File dexFile, File optimizedDir, File optimizedFile) {
                             // Do nothing.
+                            TinkerLog.i(TAG, "success to parallel optimize dex %s, opt file size: %d, use time %d",
+                                dexFile.getPath(), optimizedFile.length(), (System.currentTimeMillis() - startTime));
                         }
 
                         @Override
                         public void onFailed(File dexFile, File optimizedDir, Throwable thr) {
-                            SharePatchFileUtil.safeDeleteFile(dexFile);
-                            manager.getPatchReporter().onPatchDexOptFail(patchFile, dexFile, optimizeDexDirectory, dexFile.getName(), thr, isUpgradePatch);
+                            TinkerLog.i(TAG, "fail to parallel optimize dex %s use time %d",
+                                dexFile.getPath(), (System.currentTimeMillis() - startTime));
+                            failOptDexFile.add(dexFile);
                         }
                     }
-            );
+                );
+                // try again
+                for (File retryDexFile : failOptDexFile) {
+                    try {
+                        String outputPathName = SharePatchFileUtil.optimizedPathFor(retryDexFile, optimizeDexDirectoryFile);
 
-            return isSuccess;
+                        if (!SharePatchFileUtil.isLegalFile(retryDexFile)) {
+                            manager.getPatchReporter().onPatchDexOptFail(patchFile, retryDexFile,
+                                optimizeDexDirectory, retryDexFile.getName(), new TinkerRuntimeException("retry dex optimize file is not exist, name: " + retryDexFile.getName()));
+                            return false;
+                        }
+                        TinkerLog.i(TAG, "try to retry dex optimize file, path: %s, size: %d", retryDexFile.getPath(), retryDexFile.length());
+                        long start = System.currentTimeMillis();
+                        DexFile.loadDex(retryDexFile.getAbsolutePath(), outputPathName, 0);
+
+                        TinkerLog.i(TAG, "success retry dex optimize file, path: %s, opt file size: %d, use time: %d",
+                            retryDexFile.getPath(), new File(outputPathName).length(), (System.currentTimeMillis() - start));
+                    } catch (Throwable e) {
+                        TinkerLog.e(TAG, "retry dex optimize or load failed, path:" + retryDexFile.getPath());
+                        manager.getPatchReporter().onPatchDexOptFail(patchFile, retryDexFile, optimizeDexDirectory, retryDexFile.getName(), e);
+                        return false;
+                    }
+                }
+            // for dalvik, machine hardware performance is much worse than art machine
+            } else {
+                for (File file : files) {
+                    try {
+                        String outputPathName = SharePatchFileUtil.optimizedPathFor(file, optimizeDexDirectoryFile);
+                        long start = System.currentTimeMillis();
+                        DexFile.loadDex(file.getAbsolutePath(), outputPathName, 0);
+                        TinkerLog.i(TAG, "success single dex optimize file, path: %s, opt file size: %d, use time: %d", file.getPath(), new File(outputPathName).length(),
+                            (System.currentTimeMillis() - start));
+                    } catch (Throwable e) {
+                        TinkerLog.e(TAG, "single dex optimize or load failed, path:" + file.getPath());
+                        manager.getPatchReporter().onPatchDexOptFail(patchFile, file, optimizeDexDirectory, file.getName(), e);
+                        return false;
+                    }
+                }
+            }
         }
-
         return true;
     }
 
-    private static boolean extractDexDiffInternals(Context context, String dir, String meta, File patchFile, int type, boolean isUpgradePatch) {
+    /**
+     * for ViVo or some other rom, they would make dex2oat asynchronous
+     * so we need to check whether oat file is actually generated.
+     * @param files
+     * @param count
+     * @return
+     */
+    private static boolean checkAllDexOptFile(ArrayList<File> files, int count) {
+        for (File file : files) {
+            if (!SharePatchFileUtil.isLegalFile(file)) {
+                TinkerLog.e(TAG, "parallel dex optimizer file %s is not exist, just wait %d times", file.getName(), count);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean extractDexDiffInternals(Context context, String dir, String meta, File patchFile, int type) {
         //parse
         ArrayList<ShareDexDiffPatchInfo> patchList = new ArrayList<>();
 
@@ -165,7 +289,7 @@ public class DexDiffPatchInternal extends BasePatchInternal {
 
                 if (!SharePatchFileUtil.checkIfMd5Valid(extractedFileMd5)) {
                     TinkerLog.w(TAG, "meta file md5 invalid, type:%s, name: %s, md5: %s", ShareTinkerInternals.getTypeString(type), info.rawName, extractedFileMd5);
-                    manager.getPatchReporter().onPatchPackageCheckFail(patchFile, isUpgradePatch, BasePatchInternal.getMetaCorruptedCode(type));
+                    manager.getPatchReporter().onPatchPackageCheckFail(patchFile, BasePatchInternal.getMetaCorruptedCode(type));
                     return false;
                 }
 
@@ -191,14 +315,14 @@ public class DexDiffPatchInternal extends BasePatchInternal {
                 if (oldDexCrc.equals("0")) {
                     if (patchFileEntry == null) {
                         TinkerLog.w(TAG, "patch entry is null. path:" + patchRealPath);
-                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type, isUpgradePatch);
+                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type);
                         return false;
                     }
 
                     //it is a new file, but maybe we need to repack the dex file
                     if (!extractDexFile(patch, patchFileEntry, extractedFile, info)) {
                         TinkerLog.w(TAG, "Failed to extract raw patch file " + extractedFile.getPath());
-                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type, isUpgradePatch);
+                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type);
                         return false;
                     }
                 } else if (dexDiffMd5.equals("0")) {
@@ -209,7 +333,7 @@ public class DexDiffPatchInternal extends BasePatchInternal {
 
                     if (rawApkFileEntry == null) {
                         TinkerLog.w(TAG, "apk entry is null. path:" + patchRealPath);
-                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type, isUpgradePatch);
+                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type);
                         return false;
                     }
 
@@ -217,7 +341,7 @@ public class DexDiffPatchInternal extends BasePatchInternal {
                     String rawEntryCrc = String.valueOf(rawApkFileEntry.getCrc());
                     if (!rawEntryCrc.equals(oldDexCrc)) {
                         TinkerLog.e(TAG, "apk entry %s crc is not equal, expect crc: %s, got crc: %s", patchRealPath, oldDexCrc, rawEntryCrc);
-                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type, isUpgradePatch);
+                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type);
                         return false;
                     }
 
@@ -227,33 +351,33 @@ public class DexDiffPatchInternal extends BasePatchInternal {
 
                     if (!SharePatchFileUtil.verifyDexFileMd5(extractedFile, extractedFileMd5)) {
                         TinkerLog.w(TAG, "Failed to recover dex file when verify patched dex: " + extractedFile.getPath());
-                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type, isUpgradePatch);
+                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type);
                         SharePatchFileUtil.safeDeleteFile(extractedFile);
                         return false;
                     }
                 } else {
                     if (patchFileEntry == null) {
                         TinkerLog.w(TAG, "patch entry is null. path:" + patchRealPath);
-                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type, isUpgradePatch);
+                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type);
                         return false;
                     }
 
                     if (!SharePatchFileUtil.checkIfMd5Valid(dexDiffMd5)) {
                         TinkerLog.w(TAG, "meta file md5 invalid, type:%s, name: %s, md5: %s", ShareTinkerInternals.getTypeString(type), info.rawName, dexDiffMd5);
-                        manager.getPatchReporter().onPatchPackageCheckFail(patchFile, isUpgradePatch, BasePatchInternal.getMetaCorruptedCode(type));
+                        manager.getPatchReporter().onPatchPackageCheckFail(patchFile, BasePatchInternal.getMetaCorruptedCode(type));
                         return false;
                     }
 
                     if (rawApkFileEntry == null) {
                         TinkerLog.w(TAG, "apk entry is null. path:" + patchRealPath);
-                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type, isUpgradePatch);
+                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type);
                         return false;
                     }
                     //check source crc instead of md5 for faster
                     String rawEntryCrc = String.valueOf(rawApkFileEntry.getCrc());
                     if (!rawEntryCrc.equals(oldDexCrc)) {
                         TinkerLog.e(TAG, "apk entry %s crc is not equal, expect crc: %s, got crc: %s", patchRealPath, oldDexCrc, rawEntryCrc);
-                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type, isUpgradePatch);
+                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type);
                         return false;
                     }
 
@@ -261,13 +385,13 @@ public class DexDiffPatchInternal extends BasePatchInternal {
 
                     if (!SharePatchFileUtil.verifyDexFileMd5(extractedFile, extractedFileMd5)) {
                         TinkerLog.w(TAG, "Failed to recover dex file when verify patched dex: " + extractedFile.getPath());
-                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type, isUpgradePatch);
+                        manager.getPatchReporter().onPatchTypeExtractFail(patchFile, extractedFile, info.rawName, type);
                         SharePatchFileUtil.safeDeleteFile(extractedFile);
                         return false;
                     }
 
-                    TinkerLog.w(TAG, "success recover dex file: %s, use time: %d",
-                            extractedFile.getPath(), (System.currentTimeMillis() - start));
+                    TinkerLog.w(TAG, "success recover dex file: %s, size: %d, use time: %d",
+                            extractedFile.getPath(), extractedFile.length(), (System.currentTimeMillis() - start));
                 }
             }
         } catch (Throwable e) {
@@ -380,8 +504,8 @@ public class DexDiffPatchInternal extends BasePatchInternal {
         InputStream oldDexStream = null;
         InputStream patchFileStream = null;
         try {
-            oldDexStream = baseApk.getInputStream(oldDexEntry);
-            patchFileStream = (patchFileEntry != null ? patchPkg.getInputStream(patchFileEntry) : null);
+            oldDexStream = new BufferedInputStream(baseApk.getInputStream(oldDexEntry));
+            patchFileStream = (patchFileEntry != null ? new BufferedInputStream(patchPkg.getInputStream(patchFileEntry)) : null);
 
             final boolean isRawDexFile = SharePatchFileUtil.isRawDexFile(patchInfo.rawName);
             if (!isRawDexFile || patchInfo.isJarMode) {
@@ -401,19 +525,19 @@ public class DexDiffPatchInternal extends BasePatchInternal {
                             if (entry == null) {
                                 throw new TinkerRuntimeException("can't recognize zip dex format file:" + patchedDexFile.getAbsolutePath());
                             }
-                            new DexPatchApplier(zis, (int) entry.getSize(), patchFileStream).executeAndSaveTo(zos);
+                            new DexPatchApplier(zis, patchFileStream).executeAndSaveTo(zos);
                         } finally {
                             SharePatchFileUtil.closeQuietly(zis);
                         }
                     } else {
-                        new DexPatchApplier(oldDexStream, (int) oldDexEntry.getSize(), patchFileStream).executeAndSaveTo(zos);
+                        new DexPatchApplier(oldDexStream, patchFileStream).executeAndSaveTo(zos);
                     }
                     zos.closeEntry();
                 } finally {
                     SharePatchFileUtil.closeQuietly(zos);
                 }
             } else {
-                new DexPatchApplier(oldDexStream, (int) oldDexEntry.getSize(), patchFileStream).executeAndSaveTo(patchedDexFile);
+                new DexPatchApplier(oldDexStream, patchFileStream).executeAndSaveTo(patchedDexFile);
             }
         } finally {
             SharePatchFileUtil.closeQuietly(oldDexStream);

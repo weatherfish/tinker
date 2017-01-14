@@ -23,6 +23,7 @@ import com.tencent.tinker.loader.shareutil.SharePatchFileUtil;
 import dalvik.system.DexFile;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
@@ -35,7 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 
 public final class TinkerParallelDexOptimizer {
-    private static final String TAG = "ParallelDexOptimizer";
+    private static final String TAG = "Tinker.ParallelDex";
 
     /**
      * Optimize (trigger dexopt or dex2oat) dexes.
@@ -94,7 +95,8 @@ public final class TinkerParallelDexOptimizer {
     }
 
     public interface ResultCallback {
-        void onSuccess(File dexFile, File optimizedDir);
+        void onStart(File dexFile, File optimizedDir);
+        void onSuccess(File dexFile, File optimizedDir, File optimizedFile);
         void onFailed(File dexFile, File optimizedDir, Throwable thr);
     }
 
@@ -116,12 +118,22 @@ public final class TinkerParallelDexOptimizer {
         @Override
         public void run() {
             try {
-                DexFile.loadDex(dexFile.getAbsolutePath(), SharePatchFileUtil.optimizedPathFor(this.dexFile, this.optimizedDir), 0);
+                if (!SharePatchFileUtil.isLegalFile(dexFile)) {
+                    if (callback != null) {
+                        callback.onFailed(dexFile, optimizedDir,
+                            new IOException("dex file " + dexFile.getAbsolutePath() + " is not exist!"));
+                    }
+                }
+                if (callback != null) {
+                    callback.onStart(dexFile, optimizedDir);
+                }
+                String optimizedPath = SharePatchFileUtil.optimizedPathFor(this.dexFile, this.optimizedDir);
+                DexFile.loadDex(dexFile.getAbsolutePath(), optimizedPath, 0);
                 successCount.incrementAndGet();
                 if (callback != null) {
-                    callback.onSuccess(dexFile, optimizedDir);
+                    callback.onSuccess(dexFile, optimizedDir, new File(optimizedPath));
                 }
-            } catch (final Exception e) {
+            } catch (final Throwable e) {
                 Log.e(TAG, "Failed to optimize dex: " + dexFile.getAbsolutePath(), e);
                 if (callback != null) {
                     callback.onFailed(dexFile, optimizedDir, e);
